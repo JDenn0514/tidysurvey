@@ -1,0 +1,788 @@
+#' Calculate difference in means
+#'
+#' @description
+#' This function calculates the difference in means using a
+#' bivariate regression, as well the p-value indicating how
+#' significant each difference is. The main function doing the
+#' calculations `lm()`.
+#'
+#' NOTE: This function does not perform an actual Dunnet Test as it
+#' does not calculate the quantile of the multivariate t-distribution
+#' when determining the confidence intervals and p-values. If you need
+#' to perform an actual Dunnett Test use the `dunnett()` function
+#' instead. Please be aware that that function is far slower when
+#' there are many comparison groups due to the nature of
+#' `mvtnorm::qmvt()` and high dimensional data.
+#'
+#' @param data A data frame or tibble.
+#' @param x A numeric vector that will be used to calculate the means.
+#'   This can be a string or symbol.
+#' @param treats A variable whose values are used to determine if the means
+#'   are statistically significantly different from each other. Should be
+#'   a factor or character vector. This can be a string or symbol.
+#' @param group <[`tidy-select`][dplyr_tidy_select]> A selection of columns to
+#'   group the data by in addition to `treats`. This operates very similarly
+#'   to `.by` from dplyr (for more info on that see [?dplyr_by][dplyr_by]).
+#'   See examples to see how it operates.
+#' @param wt Weights. Add if you have a weighting variable and want to perform
+#'   Dunnett's test with weighted means.
+#' @param ref_level A string that specifies the level of the reference group
+#'   through which the others will be tested.
+#' @param conf_level A number between 0 and 1 that signifies the width of the
+#'   desired confidence interval. Default is 0.95, which corresponds to a 95%
+#'   confidence interval.
+#' @param conf_method Determines whether the confidence intervals are calculated
+#'   using the profile likelihood or the Wald method. Obviously has two options,
+#'   "profile" and "wald". Wald is between 3 to 25 times as fast but not as
+#'   reliable for small sample sizes (n < 50). For larger sample sizes,
+#'   (n > 100), they will be very similar. **The default is Wald.**
+#' @param show_means Logical. Default is `FALSE` which does not show the mean
+#'   values for the levels. If `TRUE`, will add a column called `mean` that
+#'   contains the means.
+#' @param show_pct_change Logical. Default is `FALSE` which does not show the
+#'   percent change from the reference category to the other categories. If
+#'   `TRUE`, will show the percent change.
+#' @param decimals Number of decimals each number should be rounded to. Default
+#'   is 3.
+#' @param na.rm Logical. Default is `TRUE` which removes NAs prior to
+#'   calculation.
+#'
+#' @returns A tibble with one row if no `group` is provided and `data`
+#'   is not of class `"grouped_df"`. If data is of class `"grouped_df"` or
+#'   `group` is provided, it will return one row for each unique observation
+#'   if one group is provides and one row per unique combination of observations
+#'   if multiple groups are used.
+#'
+#' @examples
+#' # load dplyr for the pipe: %>%
+#' library(dplyr)
+#' library(tidysurvey)
+#'
+#' # Check to see if any of the partisan groups are significantly different
+#' # from the control group (in this case "Democrat") for conspiracy
+#' # theory belief
+#' get_diffs(test_data, "acts_avg", "pid_f3")
+#'
+#' # now do the same as above but make "Independent" the control group
+#' get_diffs(test_data, "acts_avg", "pid_f3", ref_level = "Independent")
+#'
+#' # now let's add in education (`edu_f2`) as the `group` variable. This let's us
+#' # compare education levels within each level of `edu_f2`. Note how the arguments
+#' # don't have to be strings
+#' get_diffs(test_data, acts_avg, pid_f3, edu_f2)
+#'
+#' # we can also group by multiple variables. Due to a small n, I'm going to use
+#' # `edu_f2` instead of `edu_f`.
+#' test_data %>%
+#'   dplyr::mutate(values_f2 = make_dicho(values)) %>%
+#'   get_diffs(acts_avg, treats = pid_f3, group = c(edu_f2, values_f2))
+#'
+#' # now let's do those previous two calculations but using `dplyr::group_by()`
+#' test_data %>%
+#'   dplyr::group_by(pid_f3) %>%
+#'   get_diffs(acts_avg, edu_f)
+#'
+#' # we can also group by multiple variables
+#' test_data %>%
+#'   dplyr::mutate(values_f2 = make_dicho(values)) %>%
+#'   dplyr::group_by(pid_f3, values_f2) %>%
+#'   get_diffs(acts_avg, edu_f2)
+#'
+#' @export
+get_diffs <- function(
+  data,
+  x,
+  treats,
+  group,
+  wt,
+  ref_level = NULL,
+  conf_level = 0.95,
+  conf_method = c("wald", "profile"),
+  show_means = TRUE,
+  show_pct_change = FALSE,
+  decimals = 3,
+  na.rm = TRUE
+) {
+  UseMethod("get_diffs")
+}
+
+#' @export
+get_diffs.data.frame <- function(
+  data,
+  x,
+  treats,
+  group,
+  wt,
+  ref_level = NULL,
+  conf_level = 0.95,
+  conf_method = c("wald", "profile"),
+  show_means = TRUE,
+  show_pct_change = FALSE,
+  decimals = 3,
+  na.rm = TRUE
+) {
+  # Prep the data and get all necessary components
+  prep <- prep_diffs_data(
+    data = data,
+    x = {{ x }},
+    treats = {{ treats }},
+    group = {{ group }},
+    wt = {{ wt }},
+    ref_level = ref_level,
+    na.rm = na.rm,
+    is_survey = FALSE
+  )
+
+  # Extract components from prep
+  data <- prep$data
+  x <- prep$x
+  x_expr <- prep$x_expr
+  treats <- prep$treats
+  group_names <- prep$group_names
+  wt_name <- prep$wt_name
+  ref_level <- prep$ref_level
+  cached_x_label <- prep$cached_x_label
+  cached_treats_label <- prep$cached_treats_label
+  cached_group_labels <- prep$cached_group_labels
+
+  if (length(group_names) > 0) {
+    nest_data <- make_nested(data, {{ group_names }})
+    # iterate over each nest tibble from
+    out <- purrr::map(
+      nest_data$data,
+      \(var) {
+        bivariate_reg(
+          var,
+          x = {{ x }},
+          treats = {{ treats }},
+          wt = {{ wt_name }},
+          show_means = show_means,
+          show_pct_change = show_pct_change,
+          ref_level = ref_level,
+          conf_level = conf_level
+        )
+      }
+    ) %>%
+      stats::setNames(nest_data$name)
+
+    # combine the lists
+    out <- vctrs::vec_rbind(!!!out, .names_to = "groups") %>%
+      tidyr::separate_wider_delim(
+        cols = "groups",
+        delim = "_",
+        names = group_names
+      )
+  } else {
+    out <- bivariate_reg(
+      data = data,
+      x = {{ x }},
+      treats = {{ treats }},
+      wt = {{ wt_name }},
+      show_means = show_means,
+      show_pct_change = show_pct_change,
+      ref_level = ref_level,
+      conf_level = conf_level,
+      conf_method = conf_method
+    )
+  }
+
+  # clean up the treats variable by removing it from the string in the term col
+  out[[treats]] <- gsub(
+    pattern = treats,
+    replacement = "",
+    x = out$term,
+    fixed = TRUE
+  )
+
+  # Reorder and rename columns
+  col_order <- c(
+    group_names,
+    treats,
+    "estimate",
+    "pct_change",
+    "mean",
+    "n",
+    "conf_low",
+    "conf_high",
+    "p_value",
+    "stars"
+  )
+  col_order <- intersect(col_order, names(out))
+  out <- out[col_order]
+
+  names(out)[names(out) == "estimate"] <- "diffs"
+
+  out <- round_diffs(out, decimals)
+
+  out <- add_diff_attributes(
+    out,
+    x_expr = x_expr,
+    cached_x_label = cached_x_label,
+    treats = treats,
+    cached_treats_label = cached_treats_label,
+    group_names = group_names,
+    cached_group_labels = cached_group_labels,
+    ref_level = ref_level
+  )
+
+  out <- structure(
+    out,
+    class = c("tidysurvey_mean_diffs", "tbl_df", "tbl", "data.frame")
+  )
+
+  out
+}
+
+
+#' @export
+get_diffs.survey.design <- function(
+  data,
+  x,
+  treats,
+  group,
+  wt,
+  ref_level = NULL,
+  conf_level = 0.95,
+  conf_method = c("wald", "profile"),
+  show_means = TRUE,
+  show_pct_change = FALSE,
+  decimals = 3,
+  na.rm = TRUE
+) {
+  survey_data <- data$variables
+
+  # Prep the data and get all necessary components
+  prep <- prep_diffs_data(
+    data = survey_data,
+    x = {{ x }},
+    treats = {{ treats }},
+    group = {{ group }},
+    wt = NULL,
+    ref_level = ref_level,
+    na.rm = na.rm,
+    is_survey = TRUE
+  )
+
+  # Extract components from prep
+  data$variables <- prep$data
+  x <- prep$x
+  x_expr <- prep$x_expr
+  treats <- prep$treats
+  group_names <- prep$group_names
+  ref_level <- prep$ref_level
+  cached_x_label <- prep$cached_x_label
+  cached_treats_label <- prep$cached_treats_label
+  cached_group_labels <- prep$cached_group_labels
+
+  if (length(group_names) > 0) {
+    nest_data <- make_nested(data, {{ group_names }})
+    # iterate over each nest tibble from
+    out <- purrr::map(
+      nest_data$data,
+      \(var) {
+        bivariate_reg(
+          var,
+          x = {{ x }},
+          treats = {{ treats }},
+          show_means = show_means,
+          show_pct_change = show_pct_change,
+          ref_level = ref_level,
+          conf_level = conf_level,
+          conf_method = conf_method
+        )
+      }
+    ) %>%
+      stats::setNames(nest_data$name)
+
+    # combine the lists
+    out <- vctrs::vec_rbind(!!!out, .names_to = "groups") %>%
+      tidyr::separate_wider_delim(
+        cols = "groups",
+        delim = "_",
+        names = group_names
+      )
+  } else {
+    out <- bivariate_reg(
+      data = data,
+      x = {{ x }},
+      treats = {{ treats }},
+      show_means = show_means,
+      show_pct_change = show_pct_change,
+      ref_level = ref_level,
+      conf_level = conf_level,
+      conf_method = conf_method
+    )
+  }
+
+  # clean up the treats variable by removing it from the string in the term col
+  out[[treats]] <- gsub(
+    pattern = treats,
+    replacement = "",
+    x = out$term,
+    fixed = TRUE
+  )
+
+  # Reorder and rename columns
+  col_order <- c(
+    group_names,
+    treats,
+    "estimate",
+    "pct_change",
+    "mean",
+    "n",
+    "conf_low",
+    "conf_high",
+    "p_value",
+    "stars"
+  )
+
+  col_order <- intersect(col_order, names(out))
+  out <- out[col_order]
+
+  names(out)[names(out) == "estimate"] <- "diffs"
+
+  out <- round_diffs(out, decimals)
+
+  out <- add_diff_attributes(
+    out,
+    x_expr = x_expr,
+    cached_x_label = cached_x_label,
+    treats = treats,
+    cached_treats_label = cached_treats_label,
+    group_names = group_names,
+    cached_group_labels = cached_group_labels,
+    ref_level = ref_level
+  )
+
+  out <- structure(
+    out,
+    class = c("tidysurvey_mean_diffs", "tbl_df", "tbl", "data.frame")
+  )
+
+  out
+}
+
+#' @export
+get_diffs.svyrep.design <- function(
+  data,
+  x,
+  treats,
+  group,
+  wt,
+  ref_level = NULL,
+  conf_level = 0.95,
+  conf_method = c("wald", "profile"),
+  show_means = TRUE,
+  show_pct_change = FALSE,
+  decimals = 3,
+  na.rm = TRUE
+) {
+  survey_data <- data$variables
+
+  # Prep the data and get all necessary components
+  prep <- prep_diffs_data(
+    data = survey_data,
+    x = {{ x }},
+    treats = {{ treats }},
+    group = {{ group }},
+    wt = NULL,
+    ref_level = ref_level,
+    na.rm = na.rm,
+    is_survey = TRUE
+  )
+
+  # Extract components from prep
+  data$variables <- prep$data
+  x <- prep$x
+  x_expr <- prep$x_expr
+  treats <- prep$treats
+  group_names <- prep$group_names
+  ref_level <- prep$ref_level
+  cached_x_label <- prep$cached_x_label
+  cached_treats_label <- prep$cached_treats_label
+  cached_group_labels <- prep$cached_group_labels
+
+  if (length(group_names) > 0) {
+    nest_data <- make_nested(data, {{ group_names }})
+    # iterate over each nest tibble from
+    out <- purrr::map(
+      nest_data$data,
+      \(var) {
+        bivariate_reg(
+          var,
+          x = {{ x }},
+          treats = {{ treats }},
+          show_means = show_means,
+          show_pct_change = show_pct_change,
+          ref_level = ref_level,
+          conf_level = conf_level,
+          conf_method = conf_method
+        )
+      }
+    ) %>%
+      stats::setNames(nest_data$name)
+
+    # combine the lists
+    out <- vctrs::vec_rbind(!!!out, .names_to = "groups") %>%
+      tidyr::separate_wider_delim(
+        cols = "groups",
+        delim = "_",
+        names = group_names
+      )
+  } else {
+    out <- bivariate_reg(
+      data = data,
+      x = {{ x }},
+      treats = {{ treats }},
+      show_means = show_means,
+      show_pct_change = show_pct_change,
+      ref_level = ref_level,
+      conf_level = conf_level,
+      conf_method = conf_method
+    )
+  }
+
+  # clean up the treats variable by removing it from the string in the term col
+  out[[treats]] <- gsub(
+    pattern = treats,
+    replacement = "",
+    x = out$term,
+    fixed = TRUE
+  )
+
+  # Reorder and rename columns
+  col_order <- c(
+    group_names,
+    treats,
+    "estimate",
+    "pct_change",
+    "mean",
+    "n",
+    "conf_low",
+    "conf_high",
+    "p_value",
+    "stars"
+  )
+
+  col_order <- intersect(col_order, names(out))
+  out <- out[col_order]
+
+  names(out)[names(out) == "estimate"] <- "diffs"
+
+  out <- round_diffs(out, decimals)
+
+  out <- add_diff_attributes(
+    out,
+    x_expr = x_expr,
+    cached_x_label = cached_x_label,
+    treats = treats,
+    cached_treats_label = cached_treats_label,
+    group_names = group_names,
+    cached_group_labels = cached_group_labels,
+    ref_level = ref_level
+  )
+
+  out <- structure(
+    out,
+    class = c("tidysurvey_mean_diffs", "tbl_df", "tbl", "data.frame")
+  )
+
+  out
+}
+
+
+### main helper --------------------------------------------------------
+
+bivariate_reg <- function(
+  data,
+  x,
+  treats,
+  wt,
+  show_means = FALSE,
+  show_pct_change = FALSE,
+  ref_level,
+  conf_level = 0.95,
+  conf_method = c("wald", "profile"),
+  decimals = 3
+) {
+  if (inherits(data, "survey.design") || inherits(data, "svyrep.design")) {
+    survey_data <- data$variables
+
+    survey_data[[treats]] <- make_factor(
+      survey_data[[treats]],
+      drop_levels = TRUE,
+      force = TRUE
+    )
+
+    if (!missing(ref_level) && ref_level != levels(survey_data[[treats]])[1]) {
+      survey_data[[treats]] <- stats::relevel(survey_data[[treats]], ref_level)
+    }
+
+    data$variables <- survey_data
+
+    # create the model
+    model <- survey::svyglm(
+      # use reformulate
+      stats::reformulate(treats, x),
+      design = data
+    )
+  } else {
+    data[[treats]] <- make_factor(
+      data[[treats]],
+      drop_levels = TRUE,
+      force = TRUE
+    )
+
+    if (!missing(ref_level) && ref_level != levels(data[[treats]])[1]) {
+      data[[treats]] <- stats::relevel(data[[treats]], ref_level)
+    }
+
+    # create the model
+    model <- stats::lm(
+      # use reformulate
+      stats::reformulate(treats, x),
+      data = data,
+      weights = data[[wt]]
+    )
+  }
+
+  coefs <- clean(
+    model,
+    conf_level = conf_level,
+    include_reference = TRUE,
+    conf_method = conf_method
+  )
+
+  if (missing(ref_level)) {
+    ref_level <- coefs[2, ]$term
+  }
+
+  if (show_pct_change || show_means) {
+    # get the reference stats
+    # use grepl() to return only rows with "(Intercept)" in term col
+    ref <- coefs[grepl("(Intercept)", coefs$term, fixed = TRUE), ]
+    # Get non-reference stats
+    # Use !grepl() to return any rows without "(Intercept)" in term col
+    non_ref <- coefs[!grepl("(Intercept)", coefs$term, fixed = TRUE), ]
+
+    ref$n <- non_ref[1, ]$n
+    ref$term <- ref_level
+
+    # remove the first row from non_ref col
+    non_ref <- non_ref[-1, ]
+
+    if (show_pct_change) {
+      # if show_pct_change = TRUE, calculate percent change
+
+      ref$pct_change <- NA
+      # add the percent change from the ref group to the non-ref groups
+      non_ref$pct_change <- non_ref$estimate / ref$estimate
+    }
+
+    if (show_means) {
+      # if show_means = TRUE, calculate the means
+
+      #### clean up the ref stats row
+
+      # create a new column called "mean" with the value of the estimate
+      ref$mean <- ref$estimate
+      # set the various cols to NA
+      ref[c(
+        "p_value",
+        "moe",
+        "conf_high",
+        "conf_low"
+      )] <- NA
+      # convert the estimate to 0
+      ref$estimate <- 0
+
+      #### clean up the non-reference stats
+      # add a new column called "mean" by adding the value in the reference
+      #   mean (ref$mean) to the each value in the non-reference estimate (non-ref$estimate)
+      non_ref$mean <- ref$mean + non_ref$estimate
+
+      ### combine reference and non-reference stats
+      # combine the two objects in a list
+      list_out <- list(ref, non_ref)
+      # use vec_rbind to combine the list a df by splicing (!!!)
+      #   each element of list_out
+      out <- vctrs::vec_rbind(!!!list_out)
+    } else {
+      # if show_pct_change is true but show_means is false return just non_ref
+      out <- non_ref
+    }
+  } else {
+    # Use !grepl() to return any rows without "(Intercept)" in term col
+    out <- coefs[-c(1:2), ]
+  }
+
+  out$stars <- stars_pval(out$p_value)
+  out
+}
+
+
+# other helpers ----------------------------------------------------------
+
+prep_diffs_data <- function(
+  data,
+  x,
+  treats,
+  group = NULL,
+  wt = NULL,
+  ref_level = NULL,
+  na.rm = TRUE,
+  is_survey = FALSE
+) {
+  # Ensure inputs are symbols or strings
+  x <- rlang::as_name(rlang::ensym(x))
+  treats <- rlang::as_name(rlang::ensym(treats))
+
+  cached_treats_label <- attr_var_label(data[[treats]])
+
+  if (is.null(cached_treats_label)) {
+    cached_treats_label <- treats
+  }
+
+  # Capture the original expression passed to x (for attaching attributes later)
+  x_expr <- rlang::enexpr(x)
+
+  # Resolve group columns from tidyselect, in the order they should appear
+  group_names <- compose_group_names(data, {{ group }})
+
+  # Cache group labels (variable labels) from the pristine data
+  if (length(group_names) > 0) {
+    cached_group_labels <- attr_var_label(data[, group_names], if_null = "name")
+  } else {
+    cached_group_labels <- character(0)
+  }
+
+  # Prepare weights: returns possibly modified data plus the resolved weight column name
+  # Only do this for non-survey data
+  if (!is_survey) {
+    wt_res <- ensure_weight(data, {{ wt }})
+    data <- wt_res$data
+    wt_name <- wt_res$wt_name
+  } else {
+    wt_name <- NULL
+  }
+
+  # Cache the variable label so we can reattach it later
+  cached_x_label <- attr_var_label(data[[x_expr]])
+
+  # Check for numeric x
+  if (!is.numeric(data[[x]])) {
+    cli::cli_abort(c(
+      "{.arg x} must be of class `numeric`",
+      "i" = "`{x_expr}` is of class {class(data[[x]])}"
+    ))
+  }
+
+  # Force the treats variable to a factor
+  data[[treats]] <- make_factor(
+    data[[treats]],
+    drop_levels = TRUE,
+    force = TRUE
+  )
+
+  # If ref_level is missing, set it to the first level in the treats variable
+  if (is.null(ref_level)) {
+    ref_level <- levels(data[[treats]])[1]
+  }
+
+  # Drop NAs if requested
+  if (na.rm) {
+    chk <- unique(c(x, group_names, treats))
+    assert_nonempty_after_filter(data, chk, context = "diffs default")
+    data <- dplyr::ungroup(data)
+    data <- dplyr::filter(
+      data,
+      stats::complete.cases(dplyr::across(tidyselect::all_of(chk)))
+    )
+  }
+
+  # Return a list with all the prepared components
+  list(
+    data = data,
+    x = x,
+    x_expr = x_expr,
+    treats = treats,
+    group_names = group_names,
+    wt_name = wt_name,
+    ref_level = ref_level,
+    cached_x_label = cached_x_label,
+    cached_treats_label = cached_treats_label,
+    cached_group_labels = cached_group_labels
+  )
+}
+
+round_diffs <- function(data, decimals) {
+  # Round numeric columns
+  data$diffs <- round(data$diffs, decimals)
+  data$conf_low <- round(data$conf_low, decimals)
+  data$conf_high <- round(data$conf_high, decimals)
+  data$p_value <- round(data$p_value, decimals)
+
+  if (any("mean" == names(data))) {
+    data$mean <- round(data$mean, decimals)
+  }
+
+  if (any("pct_change" == names(data))) {
+    data$pct_change <- round(data$pct_change, decimals + 2)
+  }
+  data
+}
+
+add_diff_attributes <- function(
+  data,
+  x_expr,
+  cached_x_label,
+  treats,
+  cached_treats_label,
+  group_names,
+  cached_group_labels,
+  ref_level
+) {
+  # Add attributes
+  attr(data[[treats]], "label") <- cached_treats_label
+  attr(data$diffs, "label") <- paste(
+    "Difference in means relative to",
+    ref_level
+  )
+  attr(data$n, "label") <- "N"
+  attr(data$conf_low, "label") <- "Low CI"
+  attr(data$conf_high, "label") <- "High CI"
+  attr(data$p_value, "label") <- "P-Value"
+  attr(data$stars, "label") <- ""
+
+  if (length(group_names) > 0) {
+    # if there are groups add the value labels
+
+    # for each value in names(group_labels) add the variable label from group_labels
+    for (y in names(cached_group_labels)) {
+      attr(data[[y]], "label") <- cached_group_labels[[y]]
+    }
+
+    attr(data, "group_names") <- group_names
+    attr(data, "group_labels") <- cached_group_labels
+  }
+
+  if (any("mean" == names(data))) {
+    attr(data$mean, "label") <- "Mean"
+  }
+
+  if (any("pct_change" == names(data))) {
+    attr(data$pct_change, "label") <- "% Change"
+  }
+
+  if (!is.null(cached_x_label)) {
+    attr(data, "variable_label") <- cached_x_label
+    attr(data, "variable_name") <- x_expr
+  } else {
+    attr(data, "variable_label") <- x_expr
+    attr(data, "variable_name") <- x_expr
+  }
+
+  attr(data, "ref_level") <- paste("Reference level is", ref_level)
+
+  data
+}

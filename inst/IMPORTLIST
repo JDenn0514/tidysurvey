@@ -1,0 +1,5 @@
+as.factor = base
+attr = base
+match = base
+setdiff = base
+union = base
