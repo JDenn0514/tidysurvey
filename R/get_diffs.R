@@ -472,6 +472,7 @@ get_diffs.svyrep.design <- function(
 
 
 ### main helper --------------------------------------------------------
+### main helper --------------------------------------------------------
 bivariate_reg <- function(
   data,
   x,
@@ -480,11 +481,12 @@ bivariate_reg <- function(
   show_means = FALSE,
   show_pct_change = FALSE,
   ref_level,
-  pval_adj = NULL, # NEW ARGUMENT
+  pval_adj = NULL,
   conf_level = 0.95,
   conf_method = c("wald", "profile"),
   decimals = 3
 ) {
+  # --- 1. Data Preparation (Survey vs Data Frame) ---
   if (inherits(data, "survey.design") || inherits(data, "svyrep.design")) {
     survey_data <- data$variables
 
@@ -502,7 +504,6 @@ bivariate_reg <- function(
 
     # create the model
     model <- survey::svyglm(
-      # use reformulate
       stats::reformulate(treats, x),
       design = data
     )
@@ -519,13 +520,13 @@ bivariate_reg <- function(
 
     # create the model
     model <- stats::lm(
-      # use reformulate
       stats::reformulate(treats, x),
       data = data,
       weights = data[[wt]]
     )
   }
 
+  # --- 2. Extract Coefficients ---
   coefs <- clean(
     model,
     conf_level = conf_level,
@@ -533,6 +534,26 @@ bivariate_reg <- function(
     conf_method = conf_method
   )
 
+  # --- 3. P-Value Adjustment (Placed Early) ---
+  # We adjust here before splitting into Ref/Non-Ref.
+  # Crucially, we exclude the "(Intercept)" from adjustment because we
+  # don't want to adjust for the test of "Mean != 0", only "Treat != Control".
+  if (!is.null(pval_adj)) {
+    # Identify treatment comparisons (exclude Intercept)
+    is_comparison <- !grepl("(Intercept)", coefs$term, fixed = TRUE)
+
+    # We also ensure we only adjust non-NA p-values (to be safe against singular models)
+    to_adjust <- is_comparison & !is.na(coefs$p_value)
+
+    if (any(to_adjust)) {
+      coefs$p_value[to_adjust] <- stats::p.adjust(
+        coefs$p_value[to_adjust],
+        method = pval_adj
+      )
+    }
+  }
+
+  # --- 4. Formatting Output (Means / Pct Change) ---
   if (missing(ref_level)) {
     ref_level <- coefs[2, ]$term
   }
@@ -560,7 +581,7 @@ bivariate_reg <- function(
 
       #### clean up the ref stats row
       ref$mean <- ref$estimate
-      # set the various cols to NA
+      # set the various cols to NA (This creates the NAs you wanted to avoid handling later)
       ref[c(
         "p_value",
         "moe",
@@ -583,21 +604,7 @@ bivariate_reg <- function(
     out <- coefs[-c(1:2), ]
   }
 
-  # --- P-VALUE ADJUSTMENT (Applied before stars calculation) ---
-  if (!is.null(pval_adj)) {
-    # We only adjust p-values that are not NA (skipping the Control/Reference level)
-    # This prevents the NA values from counting as tests in the adjustment method
-    is_test <- !is.na(out$p_value)
-
-    if (any(is_test)) {
-      out$p_value[is_test] <- stats::p.adjust(
-        out$p_value[is_test],
-        method = pval_adj
-      )
-    }
-  }
-
-  # Calculate stars based on potentially adjusted p-values
+  # --- 5. Generate Stars (Uses the potentially adjusted p-values) ---
   out$stars <- stars_pval(out$p_value)
   out
 }
