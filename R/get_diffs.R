@@ -601,3 +601,170 @@ bivariate_reg <- function(
   out$stars <- stars_pval(out$p_value)
   out
 }
+
+
+# other helpers ----------------------------------------------------------
+
+prep_diffs_data <- function(
+  data,
+  x,
+  treats,
+  group = NULL,
+  wt = NULL,
+  ref_level = NULL,
+  na.rm = TRUE,
+  is_survey = FALSE
+) {
+  # Ensure inputs are symbols or strings
+  x <- rlang::as_name(rlang::ensym(x))
+  treats <- rlang::as_name(rlang::ensym(treats))
+
+  cached_treats_label <- attr_var_label(data[[treats]])
+
+  if (is.null(cached_treats_label)) {
+    cached_treats_label <- treats
+  }
+
+  # Capture the original expression passed to x (for attaching attributes later)
+  x_expr <- rlang::enexpr(x)
+
+  # Resolve group columns from tidyselect, in the order they should appear
+  group_names <- compose_group_names(data, {{ group }})
+
+  # Cache group labels (variable labels) from the pristine data
+  if (length(group_names) > 0) {
+    cached_group_labels <- attr_var_label(data[, group_names], if_null = "name")
+  } else {
+    cached_group_labels <- character(0)
+  }
+
+  # Prepare weights: returns possibly modified data plus the resolved weight column name
+  # Only do this for non-survey data
+  if (!is_survey) {
+    wt_res <- ensure_weight(data, {{ wt }})
+    data <- wt_res$data
+    wt_name <- wt_res$wt_name
+  } else {
+    wt_name <- NULL
+  }
+
+  # Cache the variable label so we can reattach it later
+  cached_x_label <- attr_var_label(data[[x_expr]])
+
+  # Check for numeric x
+  if (!is.numeric(data[[x]])) {
+    cli::cli_abort(c(
+      "{.arg x} must be of class `numeric`",
+      "i" = "`{x_expr}` is of class {class(data[[x]])}"
+    ))
+  }
+
+  # Force the treats variable to a factor
+  data[[treats]] <- make_factor(
+    data[[treats]],
+    drop_levels = TRUE,
+    force = TRUE
+  )
+
+  # If ref_level is missing, set it to the first level in the treats variable
+  if (is.null(ref_level)) {
+    ref_level <- levels(data[[treats]])[1]
+  }
+
+  # Drop NAs if requested
+  if (na.rm) {
+    chk <- unique(c(x, group_names, treats))
+    assert_nonempty_after_filter(data, chk, context = "diffs default")
+    data <- dplyr::ungroup(data)
+    data <- dplyr::filter(
+      data,
+      stats::complete.cases(dplyr::across(tidyselect::all_of(chk)))
+    )
+  }
+
+  # Return a list with all the prepared components
+  list(
+    data = data,
+    x = x,
+    x_expr = x_expr,
+    treats = treats,
+    group_names = group_names,
+    wt_name = wt_name,
+    ref_level = ref_level,
+    cached_x_label = cached_x_label,
+    cached_treats_label = cached_treats_label,
+    cached_group_labels = cached_group_labels
+  )
+}
+
+round_diffs <- function(data, decimals) {
+  # Round numeric columns
+  data$diffs <- round(data$diffs, decimals)
+  data$conf_low <- round(data$conf_low, decimals)
+  data$conf_high <- round(data$conf_high, decimals)
+  data$p_value <- round(data$p_value, decimals)
+
+  if (any("mean" == names(data))) {
+    data$mean <- round(data$mean, decimals)
+  }
+
+  if (any("pct_change" == names(data))) {
+    data$pct_change <- round(data$pct_change, decimals + 2)
+  }
+  data
+}
+
+add_diff_attributes <- function(
+  data,
+  x_expr,
+  cached_x_label,
+  treats,
+  cached_treats_label,
+  group_names,
+  cached_group_labels,
+  ref_level
+) {
+  # Add attributes
+  attr(data[[treats]], "label") <- cached_treats_label
+  attr(data$diffs, "label") <- paste(
+    "Difference in means relative to",
+    ref_level
+  )
+  attr(data$n, "label") <- "N"
+  attr(data$conf_low, "label") <- "Low CI"
+  attr(data$conf_high, "label") <- "High CI"
+  attr(data$p_value, "label") <- "P-Value"
+  attr(data$stars, "label") <- ""
+
+  if (length(group_names) > 0) {
+    # if there are groups add the value labels
+
+    # for each value in names(group_labels) add the variable label from group_labels
+    for (y in names(cached_group_labels)) {
+      attr(data[[y]], "label") <- cached_group_labels[[y]]
+    }
+
+    attr(data, "group_names") <- group_names
+    attr(data, "group_labels") <- cached_group_labels
+  }
+
+  if (any("mean" == names(data))) {
+    attr(data$mean, "label") <- "Mean"
+  }
+
+  if (any("pct_change" == names(data))) {
+    attr(data$pct_change, "label") <- "% Change"
+  }
+
+  if (!is.null(cached_x_label)) {
+    attr(data, "variable_label") <- cached_x_label
+    attr(data, "variable_name") <- x_expr
+  } else {
+    attr(data, "variable_label") <- x_expr
+    attr(data, "variable_name") <- x_expr
+  }
+
+  attr(data, "ref_level") <- paste("Reference level is", ref_level)
+
+  data
+}
