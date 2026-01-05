@@ -428,7 +428,7 @@ testthat::test_that("pivot_longer_values works with satisfaction scales", {
 
   long_df <- pivot_longer_values(
     df,
-    cols = starts_with("satisfaction_"),
+    cols = tidyselect::starts_with("satisfaction_"),
     names_to = "satisfaction_aspect",
     values_to = "rating"
   )
@@ -459,7 +459,7 @@ testthat::test_that("pivot_longer_values works with agreement scales", {
 
   long_df <- pivot_longer_values(
     df,
-    cols = starts_with("agree_"),
+    cols = tidyselect::starts_with("agree_"),
     names_to = "agreement_item",
     values_to = "agreement_level"
   )
@@ -479,7 +479,10 @@ testthat::test_that("pivot_longer_values works with mixed numeric scales", {
 
   long_df <- pivot_longer_values(
     df,
-    cols = c(starts_with("rating_"), starts_with("freq_")),
+    cols = c(
+      tidyselect::starts_with("rating_"),
+      tidyselect::starts_with("freq_")
+    ),
     names_to = "measure_type",
     values_to = "score"
   )
@@ -523,7 +526,7 @@ testthat::test_that("svyrep.design (srvyr): basic functionality with BRR", {
 
   svy_rep <- srvyr::as_survey_rep(
     .data = df,
-    repweights = starts_with("rep_"), # Assuming your rep weights start with "rep_"
+    repweights = tidyselect::starts_with("rep_"), # Assuming your rep weights start with "rep_"
     type = "BRR",
     weights = wts
   )
@@ -566,7 +569,7 @@ testthat::test_that("svyrep.design (srvyr): replicate weights matrix properly ex
 
   svy_rep <- srvyr::as_survey_rep(
     .data = df,
-    repweights = starts_with("rep_"),
+    repweights = tidyselect::starts_with("rep_"),
     type = "bootstrap",
     weights = wts
   )
@@ -605,7 +608,7 @@ testthat::test_that("svyrep.design (srvyr): different replication types", {
   # Test JKn (jackknife)
   svy_jkn <- srvyr::as_survey_rep(
     .data = df,
-    repweights = starts_with("rep_"),
+    repweights = tidyselect::starts_with("rep_"),
     type = "JKn",
     weights = wts,
     rscales = rep(3 / 4, 4)
@@ -624,7 +627,7 @@ testthat::test_that("svyrep.design (srvyr): different replication types", {
   # Test bootstrap
   svy_boot <- srvyr::as_survey_rep(
     .data = df,
-    repweights = starts_with("rep_"),
+    repweights = tidyselect::starts_with("rep_"),
     type = "bootstrap",
     weights = wts
   )
@@ -651,7 +654,7 @@ testthat::test_that("svyrep.design (srvyr): scale and rscales preserved", {
 
   svy_rep <- srvyr::as_survey_rep(
     .data = df,
-    repweights = starts_with("rep_"),
+    repweights = tidyselect::starts_with("rep_"),
     type = "BRR",
     weights = wts,
     rscales = rep(1.2, ncol(rep_weights))
@@ -679,7 +682,7 @@ testthat::test_that("svyrep.design: triggers prob branch", {
   # Create a survey object WITHOUT specifying weights
   svy_no_weights <- srvyr::as_survey_rep(
     .data = df,
-    repweights = starts_with("rep_"),
+    repweights = tidyselect::starts_with("rep_"),
     weights = wts,
     type = "BRR"
   )
@@ -708,7 +711,7 @@ testthat::test_that("svyrep.design (srvyr): respects explicit name_label", {
 
   svy_rep <- srvyr::as_survey_rep(
     .data = df,
-    repweights = starts_with("rep_"),
+    repweights = tidyselect::starts_with("rep_"),
     type = "BRR",
     weights = wts
   )
@@ -736,7 +739,7 @@ testthat::test_that("svyrep.design (srvyr): ... forwarded to tidyr::pivot_longer
 
   svy_rep <- srvyr::as_survey_rep(
     .data = df,
-    repweights = starts_with("rep_"),
+    repweights = tidyselect::starts_with("rep_"),
     type = "BRR",
     weights = wts
   )
@@ -764,7 +767,7 @@ testthat::test_that("svyrep.design (srvyr): works with multiple pivot columns", 
 
   svy_rep <- srvyr::as_survey_rep(
     .data = df,
-    repweights = starts_with("rep_"),
+    repweights = tidyselect::starts_with("rep_"),
     type = "BRR",
     weights = wts
   )
@@ -807,14 +810,14 @@ testthat::test_that("svyrep.design (srvyr): variance estimation works after pivo
 
   svy_rep <- srvyr::as_survey_rep(
     .data = df,
-    repweights = starts_with("rep_"),
+    repweights = tidyselect::starts_with("rep_"),
     type = "bootstrap",
     weights = wts
   )
 
   out <- pivot_longer_values(
     svy_rep,
-    cols = starts_with("satisfaction_"), # Use numeric variable for mean calculation
+    cols = tidyselect::starts_with("satisfaction_"), # Use numeric variable for mean calculation
     names_to = "question",
     values_to = "response"
   )
@@ -829,3 +832,39 @@ testthat::test_that("svyrep.design (srvyr): variance estimation works after pivo
 
   testthat::expect_s3_class(out, "svyrep.design")
 })
+
+
+testthat::test_that("check when value labels in one col are NULL", {
+  df <- make_basic_df() |> label_vars()
+  attr(df$x1, "labels") <- NULL
+
+  long_df <- pivot_longer_values(
+    df,
+    cols = c(x1, x2),
+    names_to = "question",
+    values_to = "response"
+  )
+
+  testthat::expect_null(attr_val_labels(long_df$response))
+})
+
+testthat::test_that("check when value labels in cols are different", {
+  df <- make_basic_df() |> label_vars()
+  attr(df$x2, "labels") <- c("yes" = "yes", "no" = "no")
+
+  long_df <- pivot_longer_values(
+    df,
+    cols = c(x1, x2),
+    names_to = "question",
+    values_to = "response"
+  )
+
+  testthat::expect_null(attr_val_labels(long_df$response))
+})
+
+#   # Basic structure
+#   testthat::expect_s3_class(long_df, "tbl_df")
+#   testthat::expect_true(all(
+#     c("id", "grp", "wts", "question", "response") %in% names(long_df)
+#   ))
+# })

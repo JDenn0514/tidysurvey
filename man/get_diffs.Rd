@@ -11,6 +11,7 @@ get_diffs(
   group,
   wt,
   ref_level = NULL,
+  pval_adj = NULL,
   conf_level = 0.95,
   conf_method = c("wald", "profile"),
   show_means = TRUE,
@@ -39,6 +40,10 @@ Dunnett's test with weighted means.}
 
 \item{ref_level}{A string that specifies the level of the reference group
 through which the others will be tested.}
+
+\item{pval_adj}{Method for adjusting p-values for multiple comparisons.
+Passed directly to \code{stats::p.adjust}. Options include "holm", "hochberg",
+"hommel", "bonferroni", "BH", "BY", "fdr", "none". Default is \code{NULL} (no adjustment).}
 
 \item{conf_level}{A number between 0 and 1 that signifies the width of the
 desired confidence interval. Default is 0.95, which corresponds to a 95\%
@@ -84,40 +89,4 @@ to perform an actual Dunnett Test use the \code{dunnett()} function
 instead. Please be aware that that function is far slower when
 there are many comparison groups due to the nature of
 \code{mvtnorm::qmvt()} and high dimensional data.
-}
-\examples{
-# load dplyr for the pipe: \%>\%
-library(dplyr)
-library(tidysurvey)
-
-# Check to see if any of the partisan groups are significantly different
-# from the control group (in this case "Democrat") for conspiracy
-# theory belief
-get_diffs(test_data, "acts_avg", "pid_f3")
-
-# now do the same as above but make "Independent" the control group
-get_diffs(test_data, "acts_avg", "pid_f3", ref_level = "Independent")
-
-# now let's add in education (`edu_f2`) as the `group` variable. This let's us
-# compare education levels within each level of `edu_f2`. Note how the arguments
-# don't have to be strings
-get_diffs(test_data, acts_avg, pid_f3, edu_f2)
-
-# we can also group by multiple variables. Due to a small n, I'm going to use
-# `edu_f2` instead of `edu_f`.
-test_data \%>\%
-  dplyr::mutate(values_f2 = make_dicho(values)) \%>\%
-  get_diffs(acts_avg, treats = pid_f3, group = c(edu_f2, values_f2))
-
-# now let's do those previous two calculations but using `dplyr::group_by()`
-test_data \%>\%
-  dplyr::group_by(pid_f3) \%>\%
-  get_diffs(acts_avg, edu_f)
-
-# we can also group by multiple variables
-test_data \%>\%
-  dplyr::mutate(values_f2 = make_dicho(values)) \%>\%
-  dplyr::group_by(pid_f3, values_f2) \%>\%
-  get_diffs(acts_avg, edu_f2)
-
 }

@@ -168,8 +168,8 @@ calc_ci.svystat <- function(
   df = Inf
 ) {
   # Extract coefficients and SEs
-  est <- coef(model)
-  v <- vcov(model)
+  est <- stats::coef(model)
+  v <- stats::vcov(model)
   if (!is.matrix(v) || NCOL(v) == 1) {
     se <- sqrt(v)
   } else {
@@ -178,7 +178,7 @@ calc_ci.svystat <- function(
 
   # Critical value (t or z)
   alpha <- (1 - conf_level) / 2
-  crit <- qt(c(alpha, 1 - alpha), df = df)
+  crit <- stats::qt(c(alpha, 1 - alpha), df = df)
 
   # Calculate CIs
   lower <- as.vector(est + se * crit[1])
@@ -291,7 +291,7 @@ MASSprofile_glm <- function(
   std.err <- summ$coefficients[, "Std. Error", drop = FALSE]
   mf <- stats::model.frame(fitted)
   Y <- stats::model.response(mf)
-  n <- NROW(Y)
+  n <- nrow(Y)
   O <- stats::model.offset(mf)
   if (!length(O)) {
     O <- rep(0, n)

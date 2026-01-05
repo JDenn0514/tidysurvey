@@ -11,7 +11,7 @@ get_freqs(
   wt,
   names_to = "names",
   values_to = "values",
-  name_label,
+  name_label = NULL,
   keep,
   drop_zero = FALSE,
   decimals = 3,

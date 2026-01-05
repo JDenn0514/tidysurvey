@@ -16,7 +16,9 @@
 #'   syms
 #' @importFrom srvyr as_survey as_survey_design as_survey_rep summarise
 #'   survey_total
-#' @importFrom stats coef model.frame model.matrix setNames terms
+#' @importFrom stats approx coef complete.cases deviance family glm.fit
+#'   model.frame model.matrix model.offset model.response model.weights
+#'   qf qnorm qchisq qt setNames spline terms vcov
 #' @importFrom survey svyglm svymean
 #' @importFrom tibble as_tibble new_tibble
 #' @importFrom tidyr complete crossing drop_na nest nesting pivot_wider
