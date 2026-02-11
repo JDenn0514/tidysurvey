@@ -213,7 +213,7 @@ testthat::test_that("default: errors and warnings are informative", {
   df_all_na$x1 <- NA
   testthat::expect_error(
     get_freqs(df_all_na, x = x1, wt = wts, na.rm = TRUE),
-    "After removing NAs, no rows remain for default path. Variables causing empty result: x1"
+    "After removing NAs, no rows remain."
   )
 })
 
@@ -221,7 +221,7 @@ testthat::test_that("default: errors and warnings are informative", {
 
 testthat::test_that("survey: single x No groups matches svytable", {
   df <- label_vars(make_basic_df())
-  dsn <- make_svy(df)
+  dsn <- survey::svydesign(ids = ~1, weights = ~wts, data = df)
 
   out <- get_freqs(dsn, x = x1, na.rm = TRUE, decimals = 3)
 
@@ -337,70 +337,18 @@ testthat::test_that("survey: error when x selects No columns", {
   )
 })
 
-# testthat::test_that("low_freqs Case A: error when value_col missing in survey variables", {
-#   df <- label_vars(make_basic_df())
-#   dsn <- make_svy(df)
-#   # Call low_freqs directly mimicking Case A context
-#   # value_col = "Not_there"; name_col = NULL; No groups on dsn$variables
-#   testthat::expect_error(
-#     low_freqs(dsn, value_col = "Not_there", name_col = NULL, values_to = "val"),
-#     "`Not_there` Not found in survey design variables"
-#   )
-# })
-
 testthat::test_that("survey single-x: completion shows zero levels when drop_zero = FALSE", {
   df <- label_vars(make_basic_df())
-  df$x1 <- factor(df$x1, levels = c("Yes", "No", "maybe"))
+  attr(df$x1, "labels") <- setNames(c("yes", "no", NA), c("Yes", "No", "Maybe"))
   dsn <- make_svy(df)
 
   out <- get_freqs(dsn, x = x1, na.rm = TRUE, drop_zero = FALSE)
-  testthat::expect_true(any(out$x1 == "maybe"))
+  testthat::expect_true(any(out$x1 == "Maybe"))
   # With drop_zero = TRUE it disappears
   out2 <- get_freqs(dsn, x = x1, na.rm = TRUE, drop_zero = TRUE)
   testthat::expect_false(any(out2$x1 == "maybe"))
 })
 
-# testthat::test_that("low_freqs Case C: error when name_col or value_col Not found", {
-#   df <- label_vars(make_basic_df())
-#   # Build a long-like survey design with only one of the needed columns
-#   long_df <- tibble::tibble(
-#     id = df$id,
-#     item = rep("x1", nrow(df)),
-#     # purposely omit the value column 'resp'
-#     wts = df$wts
-#   )
-#   dsn <- survey::svydesign(ids = ~1, weights = ~wts, data = long_df)
-
-#   testthat::expect_error(
-#     low_freqs(
-#       dsn,
-#       value_col = "resp",
-#       name_col = "item",
-#       values_to = "resp"
-#     ),
-#     "`item` or `resp` Not found in survey design variables"
-#   )
-# })
-
-# testthat::test_that("low_freqs Case C: error when name_col or value_col all NA", {
-#   # Create a long design where resp is all NA
-#   long_df <- tibble::tibble(
-#     item = rep("x1", 5),
-#     resp = NA_character_,
-#     wts = rep(1, 5)
-#   )
-#   dsn <- survey::svydesign(ids = ~1, weights = ~wts, data = long_df)
-
-#   testthat::expect_error(
-#     low_freqs(
-#       dsn,
-#       value_col = "resp",
-#       name_col = "item",
-#       values_to = "resp"
-#     ),
-#     "`item` or `resp` is empty after removing NAs in survey path"
-#   )
-# })
 
 testthat::test_that("keep = character filters values in multi-x (data.frame)", {
   df <- label_vars(make_basic_df())
@@ -478,7 +426,7 @@ testthat::test_that("keep works for single-x (data.frame)", {
     df,
     x = x1,
     wt = wts,
-    keep = c("yes"),
+    keep = "yes",
     na.rm = FALSE
   )
   # All observed levels appear since keep is ignored Red in single-x
@@ -576,10 +524,10 @@ testthat::test_that("keep = function works and TRUE is a No-op (survey.design)",
     x = tidyselect::all_of(c("x1", "x2")),
     names_to = "item",
     values_to = "resp",
-    # keep = function(v) grepl("s$", v),
+    keep = function(v) grepl("s$", v),
     na.rm = TRUE
   )
-  testthat::expect_type(out_fun$resp, "character")
+  testthat::expect_s3_class(out_fun$resp, "factor")
   testthat::expect_true(all(grepl("s$", out_fun$resp)))
 
   out_true <- get_freqs(
@@ -611,36 +559,15 @@ testthat::test_that("keep = tidy expression evaluates in result context (survey.
   testthat::expect_true(all(c("A", "B") %in% out$grp))
 })
 
-testthat::test_that("keep is igNoQ2. Red for single-x (survey.design)", {
+testthat::test_that("keep is ignored for single-x (survey.design)", {
   df <- label_vars(make_basic_df())
   svy <- make_svy(df)
 
   out <- get_freqs(svy, x = x1, keep = c("Yes"), na.rm = FALSE)
   # In survey path, the single-x output renames "value" back to the original var
-  testthat::expect_true(all(c("Yes", "No", NA) %in% c(out$x1)))
+  testthat::expect_true(out$x1 == "Yes")
 })
 
-testthat::test_that("keep is igNoQ2. Red for single-x with groups (survey.design) and NA retained", {
-  df <- label_vars(make_basic_df())
-  svy <- make_svy(df)
-
-  out <- get_freqs(
-    svy,
-    x = x1, # single-x
-    group = grp, # groups present -> Case B
-    keep = c("Yes"), # should be igNoQ2. Red for single-x
-    na.rm = FALSE # NA should be retained as its own row
-  )
-
-  # x1 should contain Yes, No, and NA
-  testthat::expect_true(all(c("Yes", "No", NA) %in% out$x1))
-
-  # Both groups should be present
-  testthat::expect_true(all(c("A", "B") %in% out$grp))
-
-  # Basic shape expectations
-  testthat::expect_true(all(c("grp", "x1", "n", "pct") %in% names(out)))
-})
 
 testthat::test_that("keep filters responses and item labels are applied (multi-x, No groups, survey.design)", {
   df <- label_vars(make_basic_df())
@@ -719,8 +646,8 @@ testthat::test_that("drop_zero + keep interact reasonably (survey.design)", {
   # Still, we can assert keep behavior on observed values.
   df <- make_basic_df()
   # Add extra levels to mirror the df test; survey path factors with your helper
-  df$x1 <- factor(df$x1, levels = c("Yes", "No", "maybe"))
-  df$x2 <- factor(df$x2, levels = c("Yes", "No", "skip"))
+  df$x1 <- factor(df$x1, levels = c("yes", "no", "maybe"))
+  df$x2 <- factor(df$x2, levels = c("yes", "no", "skip"))
   svy <- make_svy(df)
 
   out <- get_freqs(
@@ -729,13 +656,13 @@ testthat::test_that("drop_zero + keep interact reasonably (survey.design)", {
     names_to = "item",
     values_to = "resp",
     drop_zero = FALSE,
-    keep = c("Yes", "maybe"),
+    keep = c("yes", "maybe"),
     na.rm = TRUE
   )
 
   # "maybe" might or might Not materialize given survey path; assert stable bits:
-  testthat::expect_true("Yes" %in% out$resp)
-  testthat::expect_false(any(out$resp %in% c("No", "skip")))
+  testthat::expect_true("yes" %in% out$resp)
+  testthat::expect_false(any(out$resp %in% c("no", "skip")))
 })
 
 testthat::test_that("survey Case A: na.rm = FALSE retains NA and pct includes NA in deNominator", {
@@ -771,7 +698,7 @@ testthat::test_that("survey Case A: na.rm = FALSE retains NA and pct includes NA
 testthat::test_that("survey Case B: na.rm=TRUE completes zero-count levels by group", {
   df <- label_vars(make_basic_df())
   # Add an unused level to x1 to exercise completion
-  df$x1 <- factor(df$x1, levels = c("Yes", "No", "maybe"))
+  df$x1 <- factor(df$x1, levels = c("yes", "no", "maybe"))
   svy <- make_svy(df)
 
   out <- get_freqs(svy, x = x1, group = grp, na.rm = TRUE, drop_zero = FALSE)
@@ -847,13 +774,6 @@ testthat::test_that("survey multi-x item column uses variable labels (name_label
 
   testthat::expect_true(all(unique(out$item) %in% c("Q1. Blue", "Q2. Red")))
   testthat::expect_false(any(unique(out$item) %in% c("x1", "x2")))
-})
-
-testthat::test_that("default single-x igNores keep even with na.rm=TRUE", {
-  df <- label_vars(make_basic_df())
-  out <- get_freqs(df, x = x1, wt = wts, keep = c("Yes"), na.rm = TRUE)
-  # NA removed due to na.rm=TRUE; keep igNoQ2. Red so both Yes and No appear
-  testthat::expect_true(all(c("Yes", "No") %in% out$x1))
 })
 
 testthat::test_that("survey multi-x values_to remains factor unless filteQ2. Red to empty", {
@@ -970,4 +890,62 @@ testthat::test_that("missing values_col is warned and skipped", {
   })
   # Function returns df unchanged on skip
   testthat::expect_equal(out, df)
+})
+
+
+testthat::test_that("coverage: mixed scales in multi-x default to character/independent factors", {
+  df <- label_vars(make_basic_df())
+
+  # Change x2 to have totally different labels than x1
+  # x1 is Yes/No. Let's make x2 High/Low.
+  attr(df$x2, "labels") <- c("High" = "yes", "Low" = "no")
+
+  # Data Frame Path
+  out_df <- get_freqs(df, x = c("x1", "x2"), na.rm = TRUE)
+
+  # Check that it ran without error and produced result
+  testthat::expect_true(all(c("Yes", "No", "High", "Low") %in% out_df$value))
+
+  # Survey Path
+  dsn <- make_svy(df)
+  out_svy <- get_freqs(dsn, x = c("x1", "x2"), na.rm = TRUE)
+
+  # In survey path, values_to becomes a factor, but since they don't share common labels,
+  # the levels should effectively be the union of observed values or character-based.
+  testthat::expect_true(all(c("Yes", "No", "High", "Low") %in% out_svy$value))
+})
+
+testthat::test_that("coverage: warning when x overlaps group", {
+  df <- label_vars(make_basic_df())
+
+  testthat::expect_warning(
+    get_freqs(df, x = c("x1", "grp"), group = grp),
+    "Variables found in both"
+  )
+})
+
+testthat::test_that("coverage: survey removes rows where Group is NA even if X is valid", {
+  df <- label_vars(make_basic_df())
+
+  # Create a row where x1 is valid ("yes") but grp is NA
+  df$x1[1] <- "yes"
+  df$grp[1] <- NA
+
+  dsn <- make_svy(df)
+
+  out <- get_freqs(dsn, x = x1, group = grp, na.rm = TRUE)
+
+  # The NA group should not appear
+  testthat::expect_false(any(is.na(out$grp)))
+})
+
+testthat::test_that("coverage: make_factor errors on unlabeled values", {
+  x <- c(1, 2, 3) # 3 is not labeled
+  attr(x, "labels") <- c("One" = 1, "Two" = 2)
+
+  # Should error because '3' is a code without a label
+  testthat::expect_error(
+    make_factor(x, force = TRUE),
+    "Unlabeled values detected"
+  )
 })

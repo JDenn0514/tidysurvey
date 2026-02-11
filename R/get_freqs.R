@@ -44,30 +44,13 @@
 #' @param wt Optional weight column (numeric). Ignored for `survey.design`
 #'  or `svyrep.design` inputs, where weights come from the design. If omitted
 #'  for data frames, will output unweighted frequencies.
-#' @param names_to A character vector specifying the new column or columns to
-#'   create from the information stored in the column names of `data` specified
-#'   by `cols`.  Default is `"values"`.
-#'
-#'   - If length 0, or if `NULL` is supplied, no columns will be created.
-#'
-#'   - If length 1, a single column will be created which will contain the
-#'     column names specified by `cols`.
-#'
-#'   - If length >1, multiple columns will be created. In this case, one of
-#'     `names_sep` or `names_pattern` must be supplied to specify how the
-#'     column names should be split. There are also two additional character
-#'     values you can take advantage of:
-#'
-#'     - `NA` will discard the corresponding component of the column name.
-#'
-#'     - `".value"` indicates that the corresponding component of the column
-#'       name defines the name of the output column containing the cell values,
-#'       overriding `values_to` entirely.
+#' @param names_to A string specifying the name of the column to create
+#'   to hold the variable names (or labels) when `x` selects multiple variables.
+#'   Default is `"name"`.
 #' @param values_to A string specifying the name of the column to create
-#'   from the data stored in cell values. If `names_to` is a character
-#'   containing the special `.value` sentinel, this value will be ignored,
-#'   and the name of the value column will be derived from part of the
-#'   existing column names. Default is `"values"`
+#'   to hold the responses when `x` selects multiple variables.
+#'   Default is `"value"`.
+
 #' @param name_label Optional label to attach to the `names_to` column in
 #'   multi-variable outputs (e.g., a question preface). If missing, will check
 #'   the data for a `question_preface` attribute.
@@ -81,16 +64,8 @@
 #'   - tidy expression: a dplyr-style filter expression evaluated in the result
 #'     context
 #' @param drop_zero Logical; whether to drop zero-count rows from the output.
-#'
-#'   - Default path (data.frame): combined with `dplyr::count(.drop = drop_zero)` to
-#'     control inclusion of zero levels.
-#'
-#'   - Survey path (`survey.design`):
-#'
-#'     - Single-variable: zero-count response levels can be included when
-#'       `drop_zero = FALSE`.
-#'
-#'     - Multi-variable: zero-count levels are not kept at this time.
+#'   If `FALSE`, zero-count levels will be included by using `tidyr::complete()`.
+#'   Default is `FALSE`.
 #' @param decimals Number of decimal places for rounding counts (`n`). Percent
 #'   (`pct`) is rounded to `decimals + 2` so that it contains the right number
 #'   of decimals when multiplying by 100.
@@ -144,11 +119,6 @@
 #'
 #' - `get_freqs.svyrep.design()`: Operates on `svyrep.design` objects.
 #'
-#' @section Limitations (survey.design with multiple variables):
-#' For multi-variable `survey.design` inputs (`x` selects multiple variables), zero-count response
-#' levels are not currently expanded. Results include only observed levels per item, regardless of
-#' `drop_zero`. This differs from the default (non-survey) path. For single-variable
-#' `survey.design` inputs, zero-count levels can be included when `drop_zero = FALSE`.
 #'
 #' @examples
 #' # here's a basic unweighted frequency for satisfaction_service
@@ -233,88 +203,168 @@
 get_freqs <- function(
   data,
   x,
-  group,
-  wt,
-  names_to = "names",
-  values_to = "values",
+  group = NULL,
+  wt = NULL,
+  names_to = "name",
+  values_to = "value",
   name_label = NULL,
-  keep,
+  keep = NULL,
   drop_zero = FALSE,
-  decimals = 3,
+  decimals = 1,
   na.rm = TRUE
 ) {
   UseMethod("get_freqs")
 }
 
-
-# ---- default method ----
-
 #' @export
 get_freqs.data.frame <- function(
   data,
   x,
-  group,
-  wt,
-  names_to = "names",
-  values_to = "values",
+  group = NULL,
+  wt = NULL,
+  names_to = "name",
+  values_to = "value",
   name_label = NULL,
-  keep,
+  keep = NULL,
   drop_zero = FALSE,
-  decimals = 3,
+  decimals = 1,
   na.rm = TRUE
 ) {
-  keep_quo <- rlang::enquo(keep)
-
+  # 1. Validation & Selection
   prep <- prep_freqs_data(
-    data = data,
-    x = {{ x }},
-    group = {{ group }},
-    wt = {{ wt }},
-    names_to = names_to,
-    values_to = values_to,
-    name_label = name_label,
-    drop_zero = drop_zero,
-    na.rm = na.rm,
+    data,
+    {{ x }},
+    {{ group }},
+    {{ wt }},
     is_survey = FALSE
   )
 
-  data_work <- prep$data
-  is_multi <- prep$is_multi
-  value_col <- prep$value_col
-  name_col <- prep$name_col
+  df_work <- prep$data
+  x_cols <- prep$x_cols
   group_names <- prep$group_names
   wt_name <- prep$wt_name
-  x_expr <- prep$x_expr
-  cached_x_label <- prep$cached_x_label
-  cached_group_labels <- prep$cached_group_labels
-  names_to <- prep$names_to
-  values_to <- prep$values_to
-  name_label <- prep$name_label
-  x_cols <- prep$x_cols
+  is_multi <- length(x_cols) > 1
 
-  # Grouping: explicit groups, and for multi‑x with no groups, group by item
-  if (length(group_names)) {
-    data_work <- dplyr::group_by(
-      data_work,
-      dplyr::across(tidyselect::all_of(group_names))
-    )
-  } else if (is_multi) {
-    data_work <- dplyr::group_by(data_work, .data[[names_to]])
+  # Detect Common Labels (for ordering output later)
+  common_val_labs <- if (is_multi) {
+    get_common_value_labels(data, x_cols)
+  } else {
+    NULL
   }
 
-  out <- df_freqs(
-    data = data_work,
-    value_col = value_col,
-    name_col = if (is_multi) names_to else NULL,
-    wt = wt_name,
-    drop_zero = drop_zero,
-    decimals = decimals,
-    values_to = if (is_multi) values_to else value_col
-  )
-  # return(out)
-  # keep filter only for multi‑x
-  if (!rlang::quo_is_missing(keep_quo)) {
-    out <- apply_keep_filter(out, values_col = value_col, keep = keep_quo)
+  # 2. Factorize First (Corrects values 1 -> "Yes")
+  for (col in x_cols) {
+    df_work[[col]] <- make_factor(
+      df_work[[col]],
+      drop_levels = drop_zero,
+      force = TRUE,
+      na.rm = na.rm
+    )
+  }
+
+  if (length(group_names) > 0) {
+    for (col in group_names) {
+      df_work[[col]] <- make_factor(
+        df_work[[col]],
+        drop_levels = drop_zero,
+        force = TRUE,
+        na.rm = na.rm
+      )
+    }
+  }
+
+  # 3. Reshaping
+  if (is_multi) {
+    df_work <- df_work %>%
+      tidyr::pivot_longer(
+        cols = dplyr::all_of(x_cols),
+        names_to = names_to,
+        values_to = values_to
+      )
+
+    # --- FIX 1: Factorize Names (Item) Column ---
+    # Order by the original order of x_cols
+    x_labels_map <- attr_var_label(
+      data[x_cols],
+      unlist = TRUE,
+      if_null = "name"
+    )
+
+    # We set the levels to the labels in the order of x_cols
+    # and map the values simultaneously
+    df_work[[names_to]] <- factor(
+      df_work[[names_to]],
+      levels = x_cols,
+      labels = x_labels_map
+    )
+
+    # --- FIX 2: Factorize Values (Response) Column ---
+    # If variables shared a scale, preserve that factor order
+    if (!is.null(common_val_labs)) {
+      # make_factor converts codes to labels (Names of the named vector)
+      # So the desired levels are the Names of common_val_labs
+      desired_levels <- names(common_val_labs)
+
+      # Ensure existing values match desired levels before converting
+      # (They should, because we ran make_factor earlier)
+      df_work[[values_to]] <- factor(
+        as.character(df_work[[values_to]]),
+        levels = desired_levels
+      )
+    } else {
+      # If mixed scales, convert to character to be safe
+      df_work[[values_to]] <- as.character(df_work[[values_to]])
+    }
+
+    calc_val_col <- values_to
+    calc_group_cols <- c(group_names, names_to)
+  } else {
+    calc_val_col <- x_cols
+    calc_group_cols <- group_names
+  }
+
+  # 4. Calculation
+  if (na.rm) {
+    check_cols <- c(calc_group_cols, calc_val_col)
+    df_work <- df_work[stats::complete.cases(df_work[, check_cols]), ]
+    if (nrow(df_work) == 0) {
+      cli::cli_abort("After removing NAs, no rows remain.")
+    }
+  }
+
+  out <- df_work %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(c(
+      calc_group_cols,
+      calc_val_col
+    )))) %>%
+    dplyr::summarise(
+      n = if (!is.null(wt_name)) sum(.data[[wt_name]]) else dplyr::n(),
+      .groups = "drop_last"
+    )
+
+  # 5. Completion & Pct
+  if (!drop_zero) {
+    out <- out %>%
+      tidyr::complete(
+        !!rlang::sym(calc_val_col),
+        fill = list(n = 0)
+      )
+  } else {
+    out <- out %>% dplyr::filter(n > 0)
+  }
+
+  out <- out %>%
+    dplyr::mutate(
+      n = round(n, decimals),
+      pct = round(n / sum(n), decimals + 2)
+    ) %>%
+    dplyr::ungroup()
+
+  filter_col <- if (is_multi) values_to else x_cols[1]
+
+  # 6. Attributes & Finalize
+  if (!rlang::quo_is_null(rlang::enquo(keep))) {
+    out <- apply_keep_filter(out, filter_col, rlang::enquo(keep))
   }
 
   out <- attach_group_labels(out, data, group_names)
@@ -323,612 +373,329 @@ get_freqs.data.frame <- function(
     out <- attach_multi_x_attrs(
       out,
       data,
-      x_expr,
-      x_cols = x_cols,
-      names_to = names_to,
-      name_label = name_label
+      rlang::enexpr(x),
+      x_cols,
+      names_to,
+      name_label
     )
   } else {
-    out <- attach_single_x_attrs(
-      out,
-      data,
-      x_expr,
-      value_col,
-      precomputed_label = cached_x_label
-    )
+    out <- attach_single_x_attrs(out, data, rlang::enexpr(x), x_cols[1])
   }
 
-  out <- finalize_common_attrs(out, dataset = data)
-  out
+  finalize_common_attrs(out, data)
 }
 
 #' @export
 get_freqs.survey.design <- function(
   data,
   x,
-  group,
-  wt,
-  names_to = "names",
-  values_to = "values",
+  group = NULL,
+  wt = NULL,
+  names_to = "name",
+  values_to = "value",
   name_label = NULL,
-  keep,
+  keep = NULL,
   drop_zero = FALSE,
-  decimals = 3,
+  decimals = 1,
   na.rm = TRUE
 ) {
-  keep_quo <- rlang::enquo(keep)
-
-  original_data <- data$variables
+  if (!requireNamespace("srvyr", quietly = TRUE)) {
+    cli::cli_abort("srvyr required.")
+  }
 
   prep <- prep_freqs_data(
-    data = data,
-    x = {{ x }},
-    group = {{ group }},
+    data,
+    {{ x }},
+    {{ group }},
     wt = NULL,
-    names_to = names_to,
-    values_to = values_to,
-    name_label = name_label,
-    drop_zero = drop_zero,
-    na.rm = FALSE, # IMPORTANT: subset via design below
     is_survey = TRUE
   )
-
-  design_work <- prep$design_work
-  is_multi <- prep$is_multi
   x_cols <- prep$x_cols
-  value_col <- prep$value_col # for multi: "resp", for single: "x1"
-  name_col <- prep$name_col # for multi: "item"
   group_names <- prep$group_names
-  x_expr <- prep$x_expr
-  cached_x_label <- prep$cached_x_label
-  cached_group_labels <- prep$cached_group_labels
-  names_to <- prep$names_to
-  values_to <- prep$values_to
-  name_label <- prep$name_label
+  is_multi <- length(x_cols) > 1
 
-  # If na.rm: subset design_work using its variables
-  if (na.rm) {
-    keep_resp <- !is.na(design_work$variables[[value_col]])
-    keep_resp[is.na(keep_resp)] <- FALSE
-    design_work <- subset(design_work, keep_resp)
+  d_svy <- if (inherits(data, "tbl_svy")) data else srvyr::as_survey(data)
 
-    if (nrow(design_work$variables) == 0L) {
-      cli::cli_abort(
-        "After removing NAs, no rows remain for survey path."
+  # Check common labels for ordering later
+  common_val_labs <- if (is_multi) {
+    get_common_value_labels(data$variables, x_cols)
+  } else {
+    NULL
+  }
+  x_labels <- attr_var_label(
+    d_svy$variables[x_cols],
+    unlist = TRUE,
+    if_null = "name"
+  )
+
+  # Iterate
+  calc_list <- lapply(x_cols, function(curr_x) {
+    calc_survey_single_var(
+      d_svy = d_svy,
+      x_name = curr_x,
+      group_names = group_names,
+      x_label_val = x_labels[[curr_x]],
+      names_to = names_to,
+      values_to = values_to,
+      na.rm = na.rm,
+      drop_zero = drop_zero,
+      is_multi = is_multi
+    )
+  })
+
+  out <- dplyr::bind_rows(calc_list)
+  if (nrow(out) == 0) {
+    cli::cli_abort("After removing NAs, no rows remain for survey path.")
+  }
+
+  # Re-Factorize Output Columns (Multi-X only)
+  if (is_multi) {
+    out[[names_to]] <- factor(out[[names_to]], levels = x_labels)
+    if (!is.null(common_val_labs)) {
+      out[[values_to]] <- factor(
+        out[[values_to]],
+        levels = names(common_val_labs)
       )
     }
-
-    if (length(group_names) > 0L) {
-      keep_grp <- stats::complete.cases(design_work$variables[group_names])
-      design_work <- subset(design_work, keep_grp)
-
-      if (nrow(design_work$variables) == 0L) {
-        cli::cli_abort(
-          "After removing NAs, no rows remain for survey path."
-        )
-      }
-    }
   }
 
-  survey_data <- design_work$variables
-
-  # Build grouping keys:
-  key_cols <- if (is_multi) c(group_names, name_col) else group_names
-
-  gi <- .grouping_index_freqs(survey_data, key_cols)
-
-  # Build display keys: copy attrs (from original_data) THEN factorize
-  display_keys <- copy_attrs(gi$keys, original_data, vars = key_cols)
-  display_keys <- factorize_multi_groups_only(
-    display_keys,
-    group_names = key_cols,
-    drop_zero = TRUE,
-    na.rm = na.rm
-  )
-
-  # Compute grouped freqs
-  out <- .survey_grouped_freqs(
-    design = design_work,
-    value_col = value_col,
-    rows_by_group = gi$rows_by_group,
-    drop_zero = drop_zero,
-    decimals = decimals,
-    na.rm = na.rm,
-    values_to = if (is_multi) values_to else value_col,
-    key_template = display_keys,
-    key_names = key_cols
-  )
-
-  # Apply keep filter on the correct response column in the OUTPUT
-  resp_out_col <- if (is_multi) values_to else value_col
-  if (!rlang::quo_is_missing(keep_quo)) {
-    out <- apply_keep_filter(out, values_col = resp_out_col, keep = keep_quo)
-  }
-
-  # Attach group labels (only real grouping vars, not item)
-  out <- attach_group_labels(
-    out,
-    design_work,
-    group_names,
-    precomputed_labels = cached_group_labels
-  )
-
-  # Attach x metadata
+  # Arrange Rows
+  sort_cols <- c(group_names)
   if (is_multi) {
+    sort_cols <- c(sort_cols, names_to)
+  }
+  sort_cols <- c(sort_cols, values_to)
+
+  out <- out %>% dplyr::arrange(dplyr::across(dplyr::all_of(sort_cols)))
+
+  # Recalculate Pct
+  pct_group_vars <- group_names
+  if (is_multi) {
+    pct_group_vars <- c(pct_group_vars, names_to)
+  }
+
+  if (length(pct_group_vars) > 0) {
+    out <- out %>% dplyr::group_by(dplyr::across(dplyr::all_of(pct_group_vars)))
+  }
+
+  out <- out %>%
+    dplyr::mutate(
+      n = round(n, decimals),
+      pct = round(n / sum(n), decimals + 2)
+    ) %>%
+    dplyr::ungroup()
+
+  # Rename Single X columns back BEFORE filtering
+  if (!is_multi) {
+    # Force rename 'value' -> 'x1'.
+    # We use dplyr::rename for safety; if 'values_to' isn't there, it will error informatively.
+    out <- out %>%
+      dplyr::rename(!!rlang::sym(x_cols[1]) := !!rlang::sym(values_to))
+
+    # Restore factor levels for single variable output
+    # (Because we converted to character in calc_survey_single_var)
+    orig_fac <- data$variables[[x_cols[1]]]
+    if (!is.null(attr(orig_fac, "labels"))) {
+      attr(out[[x_cols[1]]], "labels") <- attr(orig_fac, "labels")
+    }
+
+    # Re-factorize to ensure levels are ordered correctly according to the design
+    out[[x_cols[1]]] <- make_factor(
+      out[[x_cols[1]]],
+      force = TRUE,
+      drop_levels = drop_zero
+    )
+  }
+
+  # Apply Keep Filter
+  # We determine the column to filter based on mode.
+  filter_col <- if (is_multi) values_to else x_cols[1]
+
+  if (!rlang::quo_is_null(rlang::enquo(keep))) {
+    out <- apply_keep_filter(out, filter_col, rlang::enquo(keep))
+  }
+
+  # Attributes & Finalize
+  out <- attach_group_labels(out, data$variables, group_names)
+
+  if (is_multi) {
+    final_cols <- c(group_names, names_to, values_to, "n", "pct")
+    out <- out %>% dplyr::select(dplyr::any_of(final_cols), dplyr::everything())
     out <- attach_multi_x_attrs(
       out,
-      data,
-      x_expr,
-      x_cols = x_cols,
-      names_to = names_to,
-      name_label = name_label
+      data$variables,
+      rlang::enexpr(x),
+      x_cols,
+      names_to,
+      name_label
     )
   } else {
-    out <- attach_single_x_attrs(
-      out,
-      design_work,
-      x_expr,
-      value_col,
-      precomputed_label = cached_x_label
-    )
+    final_cols <- c(group_names, x_cols, "n", "pct")
+    out <- out %>% dplyr::select(dplyr::any_of(final_cols), dplyr::everything())
+    out <- attach_single_x_attrs(out, data$variables, rlang::enexpr(x), x_cols)
   }
 
-  out <- finalize_common_attrs(out, dataset = design_work)
-  out
+  finalize_common_attrs(out, data)
 }
+
+#' @export
+get_freqs.svyrep.design <- get_freqs.survey.design
+#' @export
+get_freqs.tbl_svy <- get_freqs.survey.design
 
 
 # analysis helpers -------------------------------------------------------
 
-df_freqs <- function(
-  data,
-  value_col,
-  name_col = NULL,
-  wt = NULL,
-  drop_zero = FALSE,
-  decimals = 3,
-  values_to = NULL
-) {
-  values_to <- if (is.null(values_to)) value_col else values_to
-
-  # group_vars = existing dplyr groups + optional item column
-  group_vars <- dplyr::group_vars(data)
-  if (!is.null(name_col)) {
-    group_vars <- c(group_vars, name_col)
-  }
-
-  df <- data |>
-    dplyr::count(
-      dplyr::across(tidyselect::all_of(group_vars)),
-      .data[[value_col]],
-      wt = if (!is.null(wt)) .data[[wt]] else NULL,
-      .drop = drop_zero,
-      name = "n"
-    )
-
-  resp_col_name <- if (!is.null(values_to)) values_to else value_col
-
-  if (!(resp_col_name %in% names(df))) {
-    names(df)[names(df) == value_col] <- resp_col_name
-  }
-
-  df <- df |>
-    dplyr::group_by(dplyr::across(tidyselect::all_of(group_vars))) |>
-    dplyr::mutate(
-      n = round(n, decimals),
-      pct = round(n / sum(n), decimals + 2)
-    ) |>
-    dplyr::ungroup()
-
-  cols_front <- unique(c(group_vars, resp_col_name))
-  df <- df[, c(cols_front, "n", "pct"), drop = FALSE]
-
-  df
-}
-
-svy_freqs <- function(
-  design,
-  value_col,
-  drop_zero = FALSE,
-  decimals = 3,
-  na.rm = TRUE,
-  values_to = NULL
-) {
-  values_to <- if (is.null(values_to)) value_col else values_to
-
-  # Work via srvyr, similar to your existing low_freqs survey branches
-  ds <- srvyr::as_survey(design)
-
-  if (isTRUE(na.rm)) {
-    ds <- ds |> dplyr::filter(!is.na(.data[[value_col]]))
-  }
-
-  out <- ds |>
-    dplyr::group_by(.data[[value_col]]) |>
-    srvyr::summarise(
-      n = srvyr::survey_total(vartype = NULL),
-      .groups = "drop"
-    )
-
-  # Preserve factor ordering using original design levels
-  vlevs <- levels(design$variables[[value_col]])
-  if (!is.null(vlevs)) {
-    out[[value_col]] <- factor(out[[value_col]], levels = vlevs)
-  }
-
-  # When na.rm = TRUE and we have factor levels, complete across all levels
-  if (isTRUE(na.rm) && !is.null(vlevs)) {
-    out <- tidyr::complete(
-      out,
-      !!rlang::sym(value_col),
-      fill = list(n = 0)
-    )
-  }
-
-  # Convert to numeric, compute pct
-  s <- sum(out$n)
-  out$n <- round(as.numeric(out$n), decimals)
-  out$pct <- if (s > 0) round(out$n / s, decimals + 2) else NA_real_
-
-  if (drop_zero) {
-    out <- out[out$n > 0, , drop = FALSE]
-  }
-
-  # Rename response column if needed
-  if (!(values_to %in% names(out))) {
-    names(out)[names(out) == value_col] <- values_to
-  }
-
-  out
-}
-
-.grouping_index_freqs <- function(data, group_names) {
-  n <- nrow(data)
-
-  if (is.null(group_names) || length(group_names) == 0) {
-    return(list(
-      rows_by_group = list(seq_len(n)),
-      keys = tibble::tibble(.group_id = 1L)
-    ))
-  }
-
-  gkeys <- data[, group_names, drop = FALSE]
-
-  # Group id per row (fast, vctrs)
-  gid <- vctrs::vec_group_id(gkeys)
-
-  # Split row indices by group id
-  rows_by_group <- vctrs::vec_split(seq_len(n), gid)$val
-
-  # Build display keys in a value-preserving way
-  # This avoids vctrs proxy keys turning factors into integers.
-  keys <- dplyr::distinct(tibble::as_tibble(gkeys))
-
-  # Ensure the key order matches group id order:
-  # compute the first occurrence of each gid and order keys by that.
-  first_pos <- vapply(rows_by_group, function(idx) idx[[1]], integer(1))
-  ord <- order(first_pos)
-
-  list(
-    rows_by_group = rows_by_group[ord],
-    keys = keys[ord, , drop = FALSE]
-  )
-}
-
-
-.survey_grouped_freqs <- function(
-  design,
-  value_col,
-  rows_by_group,
-  drop_zero = FALSE,
-  decimals = 3,
-  na.rm = TRUE,
+calc_survey_single_var <- function(
+  d_svy,
+  x_name,
+  group_names,
+  x_label_val,
+  names_to,
   values_to,
-  # meta used to rebuild keys:
-  key_template, # a tibble of keys (group columns and optionally item)
-  key_names # character vector of column names for keys
+  na.rm,
+  drop_zero,
+  is_multi
 ) {
-  n_tot <- nrow(design$variables)
+  # 1. Filter NA
+  if (na.rm) {
+    d_svy <- tidyr::drop_na(
+      d_svy,
+      tidyselect::all_of(x_name)
+    )
 
-  est_one_group <- function(rows) {
-    if (is.numeric(rows)) {
-      mask <- rep(FALSE, n_tot)
-      idx <- rows[rows >= 1 & rows <= n_tot]
-      if (length(idx) > 0L) mask[idx] <- TRUE
-    } else {
-      stop("rows must be integer indices")
+    if (length(group_names) > 0) {
+      d_svy <- tidyr::drop_na(
+        d_svy,
+        tidyselect::all_of(group_names)
+      )
     }
 
-    d_sub <- subset(design, mask)
-
-    out <- svy_freqs(
-      design = d_sub,
-      value_col = value_col,
-      drop_zero = drop_zero,
-      decimals = decimals,
-      na.rm = na.rm,
-      values_to = values_to
-    )
-
-    out
+    # --- FIX: Check for empty design ---
+    # srvyr crashes if we summarise an empty design.
+    # Return NULL so bind_rows skips this variable.
+    if (nrow(d_svy) == 0) return(NULL)
   }
 
-  out_list <- lapply(rows_by_group, est_one_group)
+  # 2. Group & Summarise
+  calc_groups <- c(group_names, x_name)
 
-  # Bind results with keys
-  res <- dplyr::bind_rows(out_list)
+  res <- d_svy %>%
+    srvyr::group_by(dplyr::across(dplyr::all_of(calc_groups))) %>%
+    srvyr::summarise(
+      n = srvyr::survey_total(vartype = NULL),
+      .groups = "drop_last"
+    )
 
-  # Expand keys to match rows in res: each group’s freq table has rows,
-  # we need to repeat keys for each set.
-  key_ids <- rep(
-    seq_len(nrow(key_template)),
-    times = vapply(out_list, nrow, integer(1))
+  # 3. Attributes & Factorize
+  # Re-attach attributes so make_factor works on the summary column
+  orig_var <- d_svy$variables[[x_name]]
+  if (!is.null(attr(orig_var, "labels"))) {
+    attr(res[[x_name]], "labels") <- attr(orig_var, "labels")
+  }
+  if (!is.null(attr(orig_var, "label"))) {
+    attr(res[[x_name]], "label") <- attr(orig_var, "label")
+  }
+
+  res[[x_name]] <- make_factor(
+    res[[x_name]],
+    drop_levels = drop_zero,
+    force = TRUE,
+    na.rm = FALSE # NAs already filtered
   )
-  keys_rep <- key_template[key_ids, , drop = FALSE]
 
-  # Bind keys and result
-  out <- dplyr::bind_cols(keys_rep, res)
+  # Rename
+  res <- res %>% dplyr::rename(!!values_to := !!rlang::sym(x_name))
 
-  # Order columns: keys, values_to, n, pct
-  cols_front <- unique(c(key_names, values_to))
-  cols_front <- cols_front[cols_front %in% names(out)]
-  out <- out[, c(cols_front, "n", "pct"), drop = FALSE]
+  # 4. Completion
+  if (!drop_zero) {
+    # Use complete without nesting to ensure unobserved levels appear (n=0)
+    res <- res %>%
+      tidyr::complete(!!rlang::sym(values_to), fill = list(n = 0))
+  } else {
+    res <- res %>% dplyr::filter(n > 0)
+  }
 
-  out
+  # 5. Standardize (Char for binding)
+  res[[values_to]] <- as.character(res[[values_to]])
+
+  if (is_multi) {
+    res[[names_to]] <- x_label_val
+  }
+
+  return(res)
 }
 
 
 # helper functions  ------------------------------------------------------
 
-prep_freqs_data <- function(
-  data,
-  x,
-  group = NULL,
-  wt = NULL,
-  names_to = "names",
-  values_to = "values",
-  name_label = NULL,
-  drop_zero = FALSE,
-  na.rm = TRUE,
-  is_survey = FALSE
-) {
-  x_expr <- rlang::enexpr(x)
+prep_freqs_data <- function(data, x, group, wt, is_survey = FALSE) {
+  # Extract data frame for name resolution
+  df_for_names <- if (is_survey) data$variables else data
 
-  # For survey inputs, resolve names against variables
-  vars_df <- if (
-    inherits(data, "survey.design") || inherits(data, "svyrep.design")
-  ) {
-    data$variables
-  } else {
-    data
-  }
-
-  # Resolve x column names
-  x_cols <- get_col_names(vars_df, {{ x }})
-
-  existing_groups <- if (inherits(vars_df, "grouped_df")) {
-    dplyr::group_vars(vars_df)
-  } else {
-    character(0)
-  }
-  x_cols <- setdiff(x_cols, existing_groups)
-
-  if (!length(x_cols)) {
+  # Resolve X columns
+  x_cols <- tidyselect::eval_select(rlang::enquo(x), df_for_names)
+  if (length(x_cols) == 0) {
     cli::cli_abort("x must select at least one column.")
   }
+  x_cols <- names(x_cols)
 
-  # Resolve groups
-  group_names <- compose_group_names(vars_df, {{ group }})
-  group_names <- unique(c(group_names, existing_groups))
-  x_cols <- setdiff(x_cols, group_names)
+  # Resolve Group columns
+  group_names <- compose_group_names(df_for_names, {{ group }})
 
-  # Cache group labels from pristine vars_df
-  cached_group_labels <- if (length(group_names)) {
-    attr_var_label(vars_df[, group_names, drop = FALSE], if_null = "name")
-  } else {
-    character(0)
+  # Ensure Groups aren't in X
+  if (any(group_names %in% x_cols)) {
+    cli::cli_warn(
+      "Variables found in both `x` and `group`. Removing them from `x`."
+    )
+    x_cols <- setdiff(x_cols, group_names)
   }
 
-  # Weights only for non-survey
+  # Resolve Weight (only for DF)
+  wt_name <- NULL
+  data_out <- df_for_names # Default
+
   if (!is_survey) {
-    wt_res <- ensure_weight(vars_df, {{ wt }})
-    df <- wt_res$data
+    wt_res <- ensure_weight(data, {{ wt }})
+    data_out <- wt_res$data
     wt_name <- wt_res$wt_name
-  } else {
-    df <- vars_df
-    wt_name <- NULL
-  }
-
-  is_multi <- length(x_cols) > 1
-  cached_x_label <- if (!is_multi) attr_var_label(df[[x_cols[1]]]) else NULL
-
-  # ---- SURVEY PATH ----
-  if (is_survey) {
-    if (is_multi) {
-      if (
-        is.null(name_label) ||
-          (is.character(name_label) &&
-            length(name_label) == 1 &&
-            is.na(name_label))
-      ) {
-        # only default if user didn't supply
-        name_label <- attr_question_preface(vars_df[[x_cols[1]]])
-      }
-
-      # # Pivot the DESIGN, not the variables df
-      # long_design <- pivot_longer_values(
-      #   data = data,
-      #   cols = tidyselect::all_of(x_cols),
-      #   names_to = names_to,
-      #   values_to = values_to,
-      #   name_label = name_label
-      # )
-
-      df <- data$variables
-
-      long_df <- pivot_longer_values_core(
-        df = df,
-        cols = x_cols,
-        names_to = names_to,
-        values_to = values_to,
-        name_label = name_label
-      )
-
-      long_design <- rebuild_srvyr_design(long_df, data)
-
-      # sanity checks (highly recommended)
-      if (!(names_to %in% names(long_design$variables))) {
-        cli::cli_abort(
-          "After pivot, column `{names_to}` is missing from design variables."
-        )
-      }
-      if (!(values_to %in% names(long_design$variables))) {
-        cli::cli_abort(
-          "After pivot, column `{values_to}` is missing from design variables."
-        )
-      }
-
-      # Factorize inside design variables
-      long_df <- long_design$variables
-      long_df <- factorize_multi_path(
-        df = long_df,
-        values_to = values_to,
-        names_to = names_to,
-        group_names = group_names,
-        drop_zero = drop_zero,
-        na.rm = na.rm
-      )
-      long_df <- factorize_multi_groups_only(
-        long_df,
-        group_names,
-        drop_zero,
-        na.rm
-      )
-      long_design$variables <- long_df
-
-      return(list(
-        design_work = long_design,
-        is_multi = TRUE,
-        x_cols = x_cols,
-        value_col = values_to,
-        name_col = names_to,
-        group_names = group_names,
-        wt_name = NULL,
-        x_expr = x_expr,
-        cached_x_label = NULL,
-        cached_group_labels = cached_group_labels,
-        names_to = names_to,
-        values_to = values_to,
-        name_label = name_label
-      ))
-    } else {
-      # single-x: factorize variables inside design
-      x1 <- x_cols[1]
-      df2 <- df
-      df2 <- factorize_single_path(
-        df2,
-        x_name = x1,
-        group_names = group_names,
-        drop_zero = drop_zero,
-        na.rm = na.rm
-      )
-
-      data2 <- data
-      data2$variables <- df2
-
-      return(list(
-        design_work = data2,
-        is_multi = FALSE,
-        x_cols = x_cols,
-        value_col = x1,
-        name_col = NULL,
-        group_names = group_names,
-        wt_name = NULL,
-        x_expr = x_expr,
-        cached_x_label = cached_x_label,
-        cached_group_labels = cached_group_labels,
-        names_to = names_to,
-        values_to = values_to,
-        name_label = NULL
-      ))
-    }
-  }
-
-  # ---- NON-SURVEY PATH (unchanged conceptually) ----
-  if (is_multi) {
-    keep_cols <- unique(c(x_cols, group_names, wt_name))
-    narrow <- df[, keep_cols, drop = FALSE]
-
-    if (missing(name_label) || is.null(name_label)) {
-      name_label <- attr_question_preface(df[[x_cols[1]]])
-    }
-
-    long <- pivot_longer_values_core(
-      data = narrow,
-      cols = tidyselect::all_of(x_cols),
-      names_to = names_to,
-      values_to = values_to,
-      name_label = name_label
-    )
-
-    long <- factorize_multi_path(
-      long,
-      values_to,
-      names_to,
-      group_names,
-      drop_zero,
-      na.rm
-    )
-    long <- factorize_multi_groups_only(long, group_names, drop_zero, na.rm)
-
-    data_work <- long
-    value_col <- values_to
-    name_col <- names_to
-  } else {
-    keep_cols <- unique(c(x_cols[1], group_names, wt_name))
-    data_work <- df[, keep_cols, drop = FALSE]
-    data_work <- factorize_single_path(
-      data_work,
-      x_cols[1],
-      group_names,
-      drop_zero,
-      na.rm
-    )
-    value_col <- x_cols[1]
-    name_col <- NULL
-    name_label <- NULL
-  }
-
-  if (na.rm) {
-    chk <- unique(
-      if (is_multi) c(values_to, group_names) else c(value_col, group_names)
-    )
-    assert_nonempty_after_filter(data_work, chk, context = "default path")
-    data_work <- data_work[
-      stats::complete.cases(data_work[, chk, drop = FALSE]),
-      ,
-      drop = FALSE
-    ]
   }
 
   list(
-    data = data_work,
-    is_multi = is_multi,
+    data = data_out, # DF with weight col added
     x_cols = x_cols,
-    value_col = value_col,
-    name_col = name_col,
     group_names = group_names,
-    wt_name = wt_name,
-    x_expr = x_expr,
-    cached_x_label = cached_x_label,
-    cached_group_labels = cached_group_labels,
-    names_to = names_to,
-    values_to = values_to,
-    name_label = name_label
+    wt_name = wt_name
   )
 }
 
-# helpers ----------------------------------------------------------------
+get_common_value_labels <- function(data, cols) {
+  # Extract labels for all columns
+  all_labs <- lapply(cols, function(col) {
+    attr(data[[col]], "labels", exact = TRUE)
+  })
+
+  # Check if list is empty
+  if (length(all_labs) == 0) {
+    return(NULL)
+  }
+
+  # Check if all are identical to the first one
+  first_lab <- all_labs[[1]]
+
+  # If first is NULL, they must all be NULL to be "common" (but irrelevant)
+  if (is.null(first_lab)) {
+    return(NULL)
+  }
+
+  is_common <- all(vapply(
+    all_labs,
+    function(x) identical(x, first_lab),
+    logical(1)
+  ))
+
+  if (is_common) first_lab else NULL
+}
 
 compose_group_names <- function(data, group) {
   if (inherits(data, "grouped_df")) {
@@ -950,7 +717,6 @@ compose_group_names <- function(data, group) {
 
   unique(c(base_groups, extra_groups))
 }
-
 
 ensure_weight <- function(data, wt) {
   # Returns list(data = data_with_weight, wt_name = wt_col_name)
@@ -1003,136 +769,8 @@ ensure_weight <- function(data, wt) {
   list(data = data, wt_name = wt_name)
 }
 
-
-# ---- factorization helpers ----
-
-factorize_single_path <- function(df, x_name, group_names, drop_zero, na.rm) {
-  x_label <- attr_var_label(df[[x_name]])
-  value_labels <- attr_val_labels(df[[x_name]])
-
-  if (is.numeric(df[[x_name]])) {
-    labs <- sort(as.numeric(value_labels))
-    vals <- sort(unique(as.numeric(df[[x_name]])))
-  } else {
-    labs <- sort(as.character(value_labels))
-    vals <- sort(unique(as.character(df[[x_name]])))
-  }
-
-  if (!all(vals %in% labs)) {
-    if (length(group_names)) {
-      df[, group_names] <- lapply(
-        df[, group_names, drop = FALSE],
-        \(y) {
-          make_factor(y, drop_levels = drop_zero, force = TRUE, na.rm = na.rm)
-        }
-      )
-    }
-  } else {
-    df[[x_name]] <- make_factor(
-      df[[x_name]],
-      drop_levels = drop_zero,
-      force = TRUE,
-      na.rm = na.rm
-    )
-    if (length(group_names)) {
-      df[, group_names] <- lapply(
-        df[, group_names, drop = FALSE],
-        \(y) {
-          make_factor(y, drop_levels = drop_zero, force = TRUE, na.rm = na.rm)
-        }
-      )
-    }
-  }
-  df
-}
-
-factorize_multi_path <- function(
-  df,
-  values_to,
-  names_to,
-  group_names = character(0),
-  drop_zero = FALSE,
-  na.rm = TRUE
-) {
-  # Build the set of grouping variables for coercion (names_to + any explicit groups)
-  grp <- unique(c(names_to, group_names))
-
-  # 1) Factorize group vars with make_factor (always)
-  if (length(group_names)) {
-    df[, group_names] <- lapply(
-      df[, group_names, drop = FALSE],
-      \(y) make_factor(y, drop_levels = drop_zero, force = TRUE, na.rm = na.rm)
-    )
-  }
-
-  # 1b) Factorize names_to (item) more leniently
-  if (!missing(names_to) && !is.null(names_to) && names_to %in% names(df)) {
-    item_vec <- df[[names_to]]
-    item_val_labs <- attr_val_labels(item_vec)
-    if (!is.null(item_val_labs)) {
-      # If it actually has value labels, use make_factor (strict, consistent)
-      df[[names_to]] <- make_factor(
-        item_vec,
-        drop_levels = drop_zero,
-        force = TRUE,
-        na.rm = na.rm
-      )
-    } else {
-      # No value labels on item names; do not call make_factor
-      # Still turn into a factor (keep observed order to be stable)
-      df[[names_to]] <- factor(item_vec, levels = unique(item_vec))
-    }
-  }
-
-  # 2) Decide whether to factorize values_to
-  # Try to extract value labels from values_to in the long df
-  value_labels <- attr_val_labels(df[[values_to]])
-
-  if (is.null(value_labels)) {
-    # No value labels attached to the long column. Do NOT coerce values_to.
-    return(df)
-  }
-
-  # Compute labs/vals according to type
-  col_vec <- df[[values_to]]
-  if (is.numeric(col_vec)) {
-    labs <- sort(as.numeric(value_labels))
-    vals <- sort(unique(as.numeric(col_vec)))
-  } else {
-    labs <- sort(as.character(value_labels))
-    vals <- sort(unique(as.character(col_vec)))
-  }
-
-  # Only coerce values_to if all observed values have labels
-  if (all(vals %in% labs)) {
-    df[[values_to]] <- make_factor(
-      df[[values_to]],
-      drop_levels = drop_zero,
-      force = TRUE,
-      na.rm = na.rm
-    )
-  } else {
-    # Optional: warn once (comment out if you prefer silent)
-    cli::cli_warn(
-      "Not all observed values in `{values_to}` have value labels; leaving as-is."
-    )
-  }
-
-  df
-}
-
-
-factorize_multi_groups_only <- function(df, group_names, drop_zero, na.rm) {
-  if (length(group_names)) {
-    df[, group_names] <- lapply(
-      df[, group_names, drop = FALSE],
-      \(y) make_factor(y, drop_levels = drop_zero, force = TRUE, na.rm = na.rm)
-    )
-  }
-  df
-}
-
 # ---- labeling helpers ----
+
 attach_group_labels <- function(
   out,
   data,
@@ -1176,7 +814,6 @@ attach_group_labels <- function(
   out
 }
 
-
 attach_single_x_attrs <- function(
   out,
   data,
@@ -1199,7 +836,6 @@ attach_single_x_attrs <- function(
   }
   out
 }
-
 
 # Updated: supports name_label & names_to-driven attributes for multi-x
 attach_multi_x_attrs <- function(
@@ -1385,45 +1021,4 @@ apply_keep_filter <- function(df, values_col, keep) {
   cli::cli_abort(
     "Unsupported `keep` type: {class(keep)}. Use character, function, tidy expression, or logical."
   )
-}
-
-
-assert_nonempty_after_filter <- function(df, vars, context = "data") {
-  vars <- vars[vars %in% names(df)]
-  if (!length(vars)) {
-    return(invisible(TRUE))
-  }
-  keep_rows <- stats::complete.cases(df[, vars, drop = FALSE])
-  if (!any(keep_rows)) {
-    # Compose a readable message with variable names
-    msg <- paste0(
-      "After removing NAs, no rows remain for ",
-      context,
-      ". Variables causing empty result: ",
-      paste(vars, collapse = ", ")
-    )
-    cli::cli_abort(msg)
-  }
-  invisible(TRUE)
-}
-
-# Optionally reattach haven-style attrs from original_vars to display_keys
-copy_attrs <- function(dst_df, src_df, vars) {
-  for (v in vars) {
-    if (v %in% names(dst_df) && v %in% names(src_df)) {
-      lab <- attr_var_label(src_df[[v]])
-      if (!is.null(lab)) {
-        attr(dst_df[[v]], "label") <- lab
-      }
-      lbls <- attr_val_labels(src_df[[v]])
-      if (!is.null(lbls)) {
-        attr(dst_df[[v]], "labels") <- lbls
-      }
-      qp <- attr_question_preface(src_df[[v]])
-      if (!is.null(qp)) {
-        attr(dst_df[[v]], "question_preface") <- qp
-      }
-    }
-  }
-  dst_df
 }

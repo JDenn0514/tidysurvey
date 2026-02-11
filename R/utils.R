@@ -245,3 +245,14 @@ process_design <- function(design_vars, survey_args, var_name) {
 
   survey_args
 }
+
+
+factorize_multi_groups_only <- function(df, group_names, drop_zero, na.rm) {
+  if (length(group_names)) {
+    df[, group_names] <- lapply(
+      df[, group_names, drop = FALSE],
+      \(y) make_factor(y, drop_levels = drop_zero, force = TRUE, na.rm = na.rm)
+    )
+  }
+  df
+}
